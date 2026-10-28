@@ -1,16 +1,12 @@
-import os
 from celery import Celery
-
-broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
+from app.core.config import BROKER_URL, RESULT_BACKEND
 
 celery = Celery(
     "worker",
-    broker=broker,
-    backend=backend,
+    broker=BROKER_URL,
+    backend=RESULT_BACKEND,
     include=["app.tasks.sample_tasks"],
 )
-
 celery.conf.update(
     task_serializer="json",
     result_serializer="json",
@@ -18,4 +14,10 @@ celery.conf.update(
     timezone="UTC",
     enable_utc=True,
     result_expires=3600,
+    task_track_started=True,
+    broker_connection_retry_on_startup=True,
+    broker_connection_timeout=3,
+    task_publish_retry=False,
+    redis_socket_connect_timeout=3,
+    redis_socket_timeout=3,
 )
