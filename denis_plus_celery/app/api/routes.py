@@ -1,29 +1,41 @@
+import logging
+from uuid import UUID
+
+from celery.exceptions import CeleryError
 from celery.result import AsyncResult
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from kombu.exceptions import OperationalError
+from redis.exceptions import RedisError
+
 from app.core.celery_app import celery
+from app.schemas.tasks import TaskPayload, TaskQueued, TaskStatus
 from app.tasks.sample_tasks import process_compute_payload
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
+CONNECTION_ERRORS = (CeleryError, OperationalError, RedisError, OSError)
 
-class TaskPayload(BaseModel):
-    payload: str = Field(..., min_length=1)
-    iterations: int = Field(1_000_000, ge=100_000, le=5_000_000)
-
-@router.post("/process", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/process", status_code=status.HTTP_202_ACCEPTED, response_model=TaskQueued)
 def enqueue_task(data: TaskPayload):
     try:
-        async_result = process_compute_payload.delay(data.payload, data.iterations)
-        return {"status": "QUEUED", "task_id": async_result.id, "poll_url": f"/tasks/status/{async_result.id}"}
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        task = process_compute_payload.delay(data.payload, data.iterations)
+    except CONNECTION_ERRORS as exc:
+        logger.exception("Could not publish task")
+        raise HTTPException(503, "Task queue unavailable. Please try again later.") from exc
+    return TaskQueued(task_id=task.id, poll_url=f"/tasks/status/{task.id}")
 
-@router.get("/status/{task_id}")
-def get_task_status(task_id: str):
-    task = AsyncResult(task_id, app=celery)
-    response = {"task_id": task_id, "state": task.state}
-    if task.successful():
-        response["result"] = task.result
-    elif task.failed():
-        response["error"] = str(task.info)
+@router.get("/status/{task_id}", response_model=TaskStatus, response_model_exclude_none=True)
+def get_task_status(task_id: UUID):
+    try:
+        task = AsyncResult(str(task_id), app=celery)
+        # Read once so state and result describe the same snapshot.
+        metadata = task.backend.get_task_meta(task.id)
+    except CONNECTION_ERRORS as exc:
+        logger.exception("Could not read task status")
+        raise HTTPException(503, "Task results unavailable. Please try again later.") from exc
+    response = TaskStatus(task_id=str(task_id), state=metadata["status"])
+    if response.state == "SUCCESS":
+        response.result = metadata["result"]
+    elif response.state == "FAILURE":
+        response.error = "Task failed. Check the worker logs for details."
     return response

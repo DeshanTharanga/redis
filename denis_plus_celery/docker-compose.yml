@@ -1,8 +1,35 @@
-version: "3.8"
 services:
   redis:
     image: redis:7-alpine
-    container_name: denis_celery_redis
     ports:
-      - "6379:6379"
-    restart: unless-stopped
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment: &celery_environment
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["celery", "-A", "app.core.celery_app.celery", "worker", "--loglevel=info", "--concurrency=2"]
+    environment: *celery_environment
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis_data:
